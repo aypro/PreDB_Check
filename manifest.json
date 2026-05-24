@@ -1,0 +1,48 @@
+{
+  "main": "main.py",
+  "name": "PreDB_Check",
+  "displayName": "PreDB Scene Release Interceptor",
+  "homepage": "https://srrdb.com",
+  "kind": "QUEUE",
+  "version": "2.0",
+  "nzbgetMinVersion": "24",
+  "author": "Aypro",
+  "license": "GPL",
+  "about": "Validates queued NZB names against srrDB's API to mark non-scene/P2P releases as BAD.",
+  "queueEvents": "NZB_ADDED",
+  "taskTime": "",
+  "requirements": [
+    "Requires Python 3 and internet access to srrDB API."
+  ],
+  "description": [
+    "Monitors NZB_ADDED queue events. Compares the release name against srrDB. Marks the download as BAD if it's not a verified scene release, allowing Radarr/Sonarr to blacklist it via Failed Download Handling."
+  ],
+  "options": [
+    {
+      "name": "TargetCategory",
+      "displayName": "Target Category",
+      "value": "movies",
+      "description": [
+        "Only check downloads in this specific NZBGet category. Leave blank to process all queued files."
+      ],
+      "select": []
+    },
+    {
+      "name": "FailOpen",
+      "displayName": "Fail Open on API Error",
+      "value": "yes",
+      "description": [
+        "If the srrDB API experiences an outage, select yes to gracefully allow the download, or no to proactively block it."
+      ],
+      "select": ["yes", "no"]
+    }
+  ],
+  "commands": [
+    {
+      "name": "TestConnection",
+      "action": "Test srrDB Connection",
+      "displayName": "TestConnection",
+      "description": ["Click to test connectivity to the srrDB API."]
+    }
+  ]
+}
