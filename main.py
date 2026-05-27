@@ -17,7 +17,7 @@ def log(level, message):
     print(f"[{level}] PreDB-Check: {message}")
 
 def load_cache():
-    """Load cached srrDB results to avoid duplicate API calls."""
+    """Load cached predb/srrdb results to avoid duplicate API calls."""
     try:
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, "r") as f:
@@ -37,12 +37,13 @@ def get_cached_result(release_name):
     cache = load_cache()
     entry = cache.get(release_name.lower())
     if entry and (time.time() - entry.get("ts", 0) < CACHE_TTL_SECONDS):
-        return entry.get("result")
-    return None
+        # Backwards compatibility: old entries may not have 'source'
+        return entry.get("result"), entry.get("source", "unknown")
+    return None, None
 
-def set_cached_result(release_name, result):
+def set_cached_result(release_name, result, source="unknown"):
     cache = load_cache()
-    cache[release_name.lower()] = {"result": result, "ts": time.time()}
+    cache[release_name.lower()] = {"result": result, "ts": time.time(), "source": source}
     save_cache(cache)
 
 def mark_bad():
@@ -50,23 +51,106 @@ def mark_bad():
     print("[NZB] MARK=BAD")
     log("INFO", "Marked download as BAD in NZBGet queue.")
 
+def api_request(url, timeout=10, headers=None):
+    """Generic HTTP GET request wrapper."""
+    default_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) NZBGet-PreDB-Check/2.0',
+        'Accept': 'application/json'
+    }
+    if headers:
+        default_headers.update(headers)
+    req = urllib.request.Request(url, headers=default_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        if response.status != 200:
+            raise Exception(f"HTTP Status code tracking failed: {response.status}")
+        return json.loads(response.read().decode('utf-8'))
+
+def check_srrdb(release_name):
+    """Query srrDB API for exact release match.
+    
+    Returns True if found, False if not found.
+    Raises exception on API/network error.
+    """
+    api_url = f"https://api.srrdb.com/v1/search/{urllib.parse.quote(release_name)}"
+    res_data = api_request(api_url, timeout=10)
+    
+    results_count = res_data.get('resultsCount', 0)
+    results = res_data.get('results', [])
+    
+    if results_count > 0 and len(results) > 0:
+        exact_match = any(item.get('release', '').lower() == release_name.lower() for item in results)
+        return exact_match
+    return False
+
+def check_predb_net(release_name):
+    """Query predb.net API for exact release match.
+    
+    Returns True if found, False if not found.
+    Raises exception on API/network error.
+    """
+    api_url = f"https://api.predb.net/?q={urllib.parse.quote(release_name)}"
+    # predb.net sometimes blocks overly generic User-Agents; keep it clean
+    res_data = api_request(
+        api_url, 
+        timeout=10,
+        headers={'User-Agent': 'NZBGet-PreDB-Check/2.0'}
+    )
+    
+    results = res_data.get('results', 0)
+    data = res_data.get('data', [])
+    
+    if results > 0 and data:
+        exact_match = any(item.get('release', '').lower() == release_name.lower() for item in data)
+        return exact_match
+    return False
+
+def test_api_connections():
+    """Test connectivity to both APIs.
+    Returns True if at least one API responds, False otherwise.
+    Logs per-API status for NZBGet Messages panel.
+    """
+    srrdb_ok = False
+    predb_ok = False
+    
+    # Test srrDB
+    try:
+        req = urllib.request.Request(
+            "https://api.srrdb.com/v1/search/test",
+            headers={'User-Agent': 'NZBGet-PreDB-Check/2.0'}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                srrdb_ok = True
+                log("INFO", "srrDB API connection: OK")
+    except Exception as e:
+        log("WARNING", f"srrDB API connection failed: {e}")
+    
+    # Test predb.net
+    try:
+        req = urllib.request.Request(
+            "https://api.predb.net/?q=test",
+            headers={'User-Agent': 'NZBGet-PreDB-Check/2.0'}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                predb_ok = True
+                log("INFO", "predb.net API connection: OK")
+    except Exception as e:
+        log("WARNING", f"predb.net API connection failed: {e}")
+    
+    return srrdb_ok or predb_ok
+
 def main():
     # 1. Check if executed as a custom UI test command
     command = os.environ.get('NZBCP_COMMAND')
     if command is not None:
         if command == 'TestConnection':
-            log("INFO", "Testing communication with srrDB API...")
-            try:
-                req = urllib.request.Request(
-                    "https://api.srrdb.com/v1/search/Gladiator", 
-                    headers={'User-Agent': 'NZBGet-PreDB-Check/2.0'}
-                )
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    if resp.status == 200:
-                        log("INFO", "Connection successful! srrDB API is responding normally.")
-                        sys.exit(NZB_ACCEPT)
-            except Exception as e:
-                log("ERROR", f"Connection failed: {e}")
+            log("INFO", "Testing communication with PreDB validation sources...")
+            if test_api_connections():
+                log("INFO", "At least one PreDB source is responding. Connection test passed.")
+                sys.exit(NZB_ACCEPT)
+            else:
+                log("ERROR", "Both srrDB and predb.net are unreachable. Connection test failed.")
                 sys.exit(NZB_REJECT)
         else:
             log("ERROR", f"Invalid environment command received: {command}")
@@ -99,65 +183,73 @@ def main():
         log("DETAIL", f"Category '{nzb_category}' doesn't match target parameter '{target_category}'. Skipping check.")
         sys.exit(NZB_ACCEPT)
 
-    # 5. Check cache before hitting srrDB API
-    cached = get_cached_result(nzb_name)
-    if cached is not None:
-        if cached:
-            log("DETAIL", f"Cache HIT: '{nzb_name}' previously verified scene. Accepting.")
+    # 5. Check cache before hitting APIs
+    cached_result, cached_source = get_cached_result(nzb_name)
+    if cached_result is not None:
+        if cached_result:
+            log("DETAIL", f"Cache HIT: '{nzb_name}' previously verified via {cached_source}. Accepting.")
             sys.exit(NZB_ACCEPT)
         else:
-            log("DETAIL", f"Cache HIT: '{nzb_name}' previously REJECTED. Marking BAD immediately.")
+            log("DETAIL", f"Cache HIT: '{nzb_name}' previously REJECTED by {cached_source}. Marking BAD immediately.")
             mark_bad()
             sys.exit(NZB_REJECT)
 
-    log("DETAIL", f"Verifying validation signature via srrDB for: {nzb_name}")
+    log("DETAIL", f"Verifying validation signature for: {nzb_name}")
 
-    # 6. JSON Payload API request execution
-    api_url = f"https://api.srrdb.com/v1/search/{urllib.parse.quote(nzb_name)}"
-    req = urllib.request.Request(
-        api_url, 
-        headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) NZBGet-PreDB-Check/2.0',
-            'Accept': 'application/json'
-        }
-    )
-
+    # 6. Query srrDB API
+    srrdb_explicit = None   # True = found, False = not found, None = error
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            if response.status != 200:
-                raise Exception(f"HTTP Status code tracking failed: {response.status}")
-                
-            res_data = json.loads(response.read().decode('utf-8'))
-            results_count = res_data.get('resultsCount', 0)
-            results = res_data.get('results', [])
-            
-            if results_count > 0 and len(results) > 0:
-                exact_match = any(item.get('release', '').lower() == nzb_name.lower() for item in results)
-                
-                if exact_match:
-                    set_cached_result(nzb_name, True)
-                    log("DETAIL", "Success! Match locked in srrDB. Proceeding with download.")
-                    sys.exit(NZB_ACCEPT)
-                else:
-                    set_cached_result(nzb_name, False)
-                    log("DETAIL", "REJECTED: Loose results surfaced, but exact scene signature verification failed.")
-                    mark_bad()
-                    sys.exit(NZB_REJECT)
-            else:
-                set_cached_result(nzb_name, False)
-                log("DETAIL", "REJECTED: Release hash could not be matched against verified scene entries.")
-                mark_bad()
-                sys.exit(NZB_REJECT)
-
-    except Exception as e:
-        log("WARNING", f"srrDB API Gateway timeout or validation error: {e}")
-        if fail_open:
-            log("DETAIL", "FailOpen safety trigger is active. Allowing task pipeline to bypass.")
+        srrdb_found = check_srrdb(nzb_name)
+        srrdb_explicit = srrdb_found
+        if srrdb_found:
+            set_cached_result(nzb_name, True, source="srrdb")
+            log("DETAIL", "Success! Match found in srrDB. Proceeding with download.")
             sys.exit(NZB_ACCEPT)
         else:
-            log("DETAIL", "FailOpen parameter is disabled. Dropping download due to validation requirement rules.")
-            mark_bad()
-            sys.exit(NZB_REJECT)
+            log("DETAIL", "srrDB: exact release not found.")
+    except Exception as e:
+        log("WARNING", f"srrDB API error: {e}")
+        srrdb_explicit = None  # Mark as errored
+
+    # 7. Fallback to predb.net API
+    predb_explicit = None    # True = found, False = not found, None = error
+    try:
+        predb_found = check_predb_net(nzb_name)
+        predb_explicit = predb_found
+        if predb_found:
+            set_cached_result(nzb_name, True, source="predb.net")
+            log("DETAIL", "Success! Match found in predb.net. Proceeding with download.")
+            sys.exit(NZB_ACCEPT)
+        else:
+            log("DETAIL", "predb.net: exact release not found.")
+    except Exception as e:
+        log("WARNING", f"predb.net API error: {e}")
+        predb_explicit = None  # Mark as errored
+
+    # 8. Decision logic
+    # If at least one API explicitly said "not found", we trust that and reject.
+    # fail_open only triggers when BOTH APIs encountered errors (unreachable).
+    if srrdb_explicit is False or predb_explicit is False:
+        rejecting_source = []
+        if srrdb_explicit is False:
+            rejecting_source.append("srrdb")
+        if predb_explicit is False:
+            rejecting_source.append("predb.net")
+        source_str = " and ".join(rejecting_source)
+        
+        set_cached_result(nzb_name, False, source=source_str)
+        log("DETAIL", f"REJECTED: Release not found in {source_str}.")
+        mark_bad()
+        sys.exit(NZB_REJECT)
+    
+    # Both APIs errored; apply fail_open logic
+    if fail_open:
+        log("DETAIL", "FailOpen safety trigger is active (both APIs down). Allowing task pipeline to bypass.")
+        sys.exit(NZB_ACCEPT)
+    else:
+        log("DETAIL", "FailOpen parameter is disabled (both APIs down). Dropping download due to validation requirement rules.")
+        mark_bad()
+        sys.exit(NZB_REJECT)
 
 if __name__ == "__main__":
     main()

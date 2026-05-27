@@ -1,13 +1,14 @@
 # PreDB Check for NZBGet
 
-An NZBGet **QUEUE** extension that validates queued NZB names against the [srrDB](https://srrdb.com) scene release database. Non-scene / P2P / fake releases are automatically marked as **BAD** in NZBGet, allowing *arr apps (Radarr, Sonarr, etc.) to blacklist them via Failed Download Handling.
+An NZBGet **QUEUE** extension that validates queued NZB names against the [srrDB](https://srrdb.com) scene release database and falls back to [predb.net](https://predb.net). Non-scene / P2P / fake releases are automatically marked as **BAD** in NZBGet, allowing *arr apps (Radarr, Sonarr, etc.) to blacklist them via Failed Download Handling.
 
 ## What it does
 
 When an NZB is added to the queue, this script:
-1. Checks if the release name exists on srrDB with an **exact match**
-2. If it matches a verified scene release → the download proceeds normally
-3. If it does **not** match → NZBGet receives `MARK=BAD`, Radarr/Sonarr sees the failure and blacklists the release
+1. Checks if the release name exists on **srrDB** with an **exact match**
+2. If not found on srrDB, falls back to **predb.net** with an **exact match**
+3. If it matches on either → the download proceeds normally
+4. If it does **not** match on either → NZBGet receives `MARK=BAD`, Radarr/Sonarr sees the failure and blacklists the release
 
 This keeps your library clean by rejecting P2P repacks, fake uploads, and non-scene releases before they finish downloading.
 
@@ -15,7 +16,7 @@ This keeps your library clean by rejecting P2P repacks, fake uploads, and non-sc
 
 - NZBGet **v24+** (uses the modern Extension API)
 - Python **3.x** on the NZBGet host
-- Working internet connection for srrDB API calls
+- Working internet connection for srrDB and predb.net API calls
 
 ## Installation
 
@@ -45,7 +46,7 @@ This extension is not yet published in the official NZBGet Extension Manager rep
 | Option | Default | Description |
 |--------|---------|-------------|
 | **Target Category** | `movies` | Only validate downloads in this category. Leave blank to process all categories. |
-| **Fail Open on API Error** | `yes` | If srrDB is unreachable, `yes` allows the download; `no` blocks it. |
+| **Fail Open on API Error** | `yes` | If **both** srrDB and predb.net are unreachable, `yes` allows the download; `no` blocks it. |
 
 ## How it works with Radarr / Sonarr
 
