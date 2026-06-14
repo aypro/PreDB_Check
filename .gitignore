@@ -1,1 +1,5 @@
 predb_cache.json
+releaselist.txt
+releaselist.sqlite
+.releaselist.building
+*.cookie

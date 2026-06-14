@@ -4,18 +4,19 @@
   "displayName": "PreDB Scene Release Interceptor",
   "homepage": "https://srrdb.com",
   "kind": "QUEUE",
-  "version": "2.0",
+  "version": "2.1",
   "nzbgetMinVersion": "24",
   "author": "Aypro",
   "license": "GPL",
-  "about": "Validates queued NZB names against srrDB's API to mark non-scene/P2P releases as BAD.",
+  "about": "Validates queued NZB names against srrDB's local open-data index and live APIs (srrDB + predb.net) to mark non-scene/P2P releases as BAD.",
   "queueEvents": "NZB_ADDED",
   "taskTime": "",
   "requirements": [
-    "Requires Python 3 and internet access to srrDB API."
+    "Requires Python 3 and internet access to srrDB and predb.net APIs.",
+    "Optional: a local copy of the srrdb.com open releaselist (releaselist.txt) for offline / faster lookups. See README."
   ],
   "description": [
-    "Monitors NZB_ADDED queue events. Compares the release name against srrDB. Marks the download as BAD if it's not a verified scene release, allowing Radarr/Sonarr to blacklist it via Failed Download Handling."
+    "Monitors NZB_ADDED queue events. Compares the release name against the srrDB open-data index (local file, optional) and the srrDB + predb.net live APIs. Marks the download as BAD if no source confirms it, allowing Radarr/Sonarr to blacklist it via Failed Download Handling."
   ],
   "options": [
     {
@@ -32,9 +33,27 @@
       "displayName": "Fail Open on API Error",
       "value": "yes",
       "description": [
-        "If the srrDB API experiences an outage, select yes to gracefully allow the download, or no to proactively block it."
+        "If the srrDB and predb.net APIs both experience an outage, select yes to gracefully allow the download, or no to proactively block it. (The local releaselist index, if present, is unaffected by this setting — local misses never cause rejection.)"
       ],
       "select": ["yes", "no"]
+    },
+    {
+      "name": "EnableLocalLookup",
+      "displayName": "Use Local Releaselist Index",
+      "value": "yes",
+      "description": [
+        "If yes and a local releaselist.txt is present, look up releases in the generated SQLite index before calling any live API. A local hit short-circuits the APIs entirely; a local miss falls through to the live APIs (which keep their existing reject authority). Disable to always use live APIs."
+      ],
+      "select": ["yes", "no"]
+    },
+    {
+      "name": "LocalReleaselistPath",
+      "displayName": "Local Releaselist Path",
+      "value": "",
+      "description": [
+        "Absolute path to the local srrdb.com open releaselist (releaselist.txt). Leave blank to use <scriptdir>/releaselist.txt. The file is one release per line, ~555 MB / 10.6M entries at last check. Download from https://www.srrdb.com/open/releaselist (see README for the recommended way past the Anubis challenge). The SQLite index is generated next to it automatically."
+      ],
+      "select": []
     }
   ],
   "commands": [
@@ -42,7 +61,15 @@
       "name": "TestConnection",
       "action": "Test srrDB Connection",
       "displayName": "TestConnection",
-      "description": ["Click to test connectivity to the srrDB API."]
+      "description": ["Click to test connectivity to the srrDB and predb.net APIs."]
+    },
+    {
+      "name": "BuildLocalIndex",
+      "action": "Build Local Releaselist Index",
+      "displayName": "BuildLocalIndex",
+      "description": [
+        "Rebuild the SQLite index from releaselist.txt. ~16 seconds for 10.6M entries, ~1.3 GB output. Run this after copying a fresh releaselist.txt; the script will also auto-rebuild on first use or when the .txt is updated."
+      ]
     }
   ]
 }
