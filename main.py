@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import time
+import tempfile
 import urllib.request
 import urllib.parse
 
@@ -16,20 +17,30 @@ CACHE_TTL_SECONDS = 86400  # 24 hours
 def log(level, message):
     print(f"[{level}] PreDB-Check: {message}")
 
+def prune_cache(cache):
+    """Remove entries older than CACHE_TTL_SECONDS to prevent unbounded growth."""
+    now = time.time()
+    return {k: v for k, v in cache.items() if now - v.get("ts", 0) < CACHE_TTL_SECONDS}
+
 def load_cache():
     """Load cached predb/srrdb results to avoid duplicate API calls."""
     try:
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, "r") as f:
-                return json.load(f)
+                cache = json.load(f)
+                return prune_cache(cache)
     except Exception:
         pass
     return {}
 
 def save_cache(cache):
     try:
-        with open(CACHE_FILE, "w") as f:
+        dir_name = os.path.dirname(os.path.abspath(CACHE_FILE)) or "."
+        with tempfile.NamedTemporaryFile(mode="w", dir=dir_name, delete=False) as f:
             json.dump(cache, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(f.name, CACHE_FILE)
     except Exception as e:
         log("WARNING", f"Failed to write cache file: {e}")
 
@@ -62,8 +73,12 @@ def api_request(url, timeout=10, headers=None):
     req = urllib.request.Request(url, headers=default_headers)
     with urllib.request.urlopen(req, timeout=timeout) as response:
         if response.status != 200:
-            raise Exception(f"HTTP Status code tracking failed: {response.status}")
-        return json.loads(response.read().decode('utf-8'))
+            raise Exception(f"HTTP request failed with status: {response.status}")
+        try:
+            data = json.loads(response.read().decode('utf-8'))
+        except json.JSONDecodeError as e:
+            raise Exception(f"Invalid JSON response from {url}: {e}")
+        return data
 
 def check_srrdb(release_name):
     """Query srrDB API for exact release match.
@@ -78,7 +93,10 @@ def check_srrdb(release_name):
     results = res_data.get('results', [])
     
     if results_count > 0 and len(results) > 0:
-        exact_match = any(item.get('release', '').lower() == release_name.lower() for item in results)
+        exact_match = any(
+            item.get('release', '').strip().lower() == release_name.strip().lower()
+            for item in results
+        )
         return exact_match
     return False
 
@@ -100,7 +118,10 @@ def check_predb_net(release_name):
     data = res_data.get('data', [])
     
     if results > 0 and data:
-        exact_match = any(item.get('release', '').lower() == release_name.lower() for item in data)
+        exact_match = any(
+            item.get('release', '').strip().lower() == release_name.strip().lower()
+            for item in data
+        )
         return exact_match
     return False
 
@@ -111,33 +132,27 @@ def test_api_connections():
     """
     srrdb_ok = False
     predb_ok = False
-    
+
     # Test srrDB
     try:
-        req = urllib.request.Request(
-            "https://api.srrdb.com/v1/search/test",
-            headers={'User-Agent': 'NZBGet-PreDB-Check/2.0'}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if resp.status == 200:
-                srrdb_ok = True
-                log("INFO", "srrDB API connection: OK")
+        api_request("https://api.srrdb.com/v1/search/test", timeout=5)
+        srrdb_ok = True
+        log("INFO", "srrDB API connection: OK")
     except Exception as e:
         log("WARNING", f"srrDB API connection failed: {e}")
-    
+
     # Test predb.net
     try:
-        req = urllib.request.Request(
+        api_request(
             "https://api.predb.net/?q=test",
+            timeout=5,
             headers={'User-Agent': 'NZBGet-PreDB-Check/2.0'}
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if resp.status == 200:
-                predb_ok = True
-                log("INFO", "predb.net API connection: OK")
+        predb_ok = True
+        log("INFO", "predb.net API connection: OK")
     except Exception as e:
         log("WARNING", f"predb.net API connection failed: {e}")
-    
+
     return srrdb_ok or predb_ok
 
 def main():
